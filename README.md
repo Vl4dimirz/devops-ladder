@@ -101,11 +101,51 @@ systemd creates through `RuntimeDirectory=sshd`, so it is absent for the moment 
 upgrades `openssh-server` in step 1. The script creates it before validating, which is
 what the service unit does anyway.
 
+## `ansible/harden.yml` — the same machine, run again next week
+
+`harden.sh` is for the first ten minutes of a new box: paste it, run it, nothing needs to
+be installed on the far end first. The playbook is for the box you now have to keep, and it
+answers a question the shell script cannot: **what has drifted since the last time?**
+
+That only works if running it twice changes nothing the second time, which is a property
+that has to be proven rather than asserted. CI runs the playbook, checks the machine with
+the same verifier, runs it a second time, and fails the build unless the second run reports
+`changed=0`:
+
+```
+run 1:  ok=20   changed=11
+run 2:  ok=19   changed=0
+```
+
+The difference of one in `ok` is the `restart ssh` handler. It fired on the first run
+because the config changed, and did not fire on the second because nothing did — which is
+the behaviour you want on a machine somebody is logged into.
+
+Getting there means using real modules rather than wrapping shell commands in YAML. A
+playbook written with `command:` everywhere passes the hardening checks and fails the
+idempotency check, because `command:` reports `changed` whether or not anything happened.
+The only `command:` here is `sshd -T`, and it carries `changed_when: false`.
+
+Three things the modules give you that the shell script had to do by hand:
+
+- `validate: visudo -cf %s` on the sudoers file — a syntax error there disables `sudo`
+  machine-wide, and on a box with root login already off, that is unrecoverable
+- `append: true` on the user's groups, so adding `sudo` does not silently drop every other
+  group the account was in
+- `exclusive: false` on the authorized key, so deploying does not lock out a colleague's
+  key that was already installed
+
+The `sshd -T` assertion from bug 1 is carried over intact: the playbook writes
+`00-hardening.conf`, then refuses to continue unless sshd resolves to the values it set.
+
 ## Status
 
 - **`harden.sh`** — runs on a real Ubuntu VM in CI on every push, all 21 checks passing.
   Not yet run against a long-lived internet-facing host, which is a different thing: no
   reboot, no persistence across days, no real attack traffic
+- **`ansible/harden.yml`** — same six controls, verified by the same script, and proven
+  idempotent: second run reports `changed=0`. Tested only against `localhost` with
+  `connection: local`, never over SSH to a remote inventory
 - **`verify-hardening.sh`** — 21 checks and 3 warnings, with a negative control proving it
   detects an unhardened machine
 - **`oci-grab-vm.sh`** — exercised against the live OCI API, never reached a running VM.
@@ -120,6 +160,7 @@ than removing the conflict.
 
 - [x] R1 write the hardening script
 - [x] R1 run it against a real machine, with each control verified afterwards
+- [x] Convert `harden.sh` to an Ansible playbook, tested by the same verifier and proven
+      idempotent in CI
 - [ ] Run against a long-lived VPS and confirm the settings survive a reboot
-- [ ] Convert `harden.sh` to an Ansible playbook, tested by the same verifier
 - [ ] Terraform for the infrastructure instead of console clicks
