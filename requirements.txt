@@ -1,0 +1,6 @@
+# ล็อกเวอร์ชันไว้ เพื่อให้ CI ให้ผลเหมือนเดิมทุกครั้ง
+# ⚠️ แพ็กเกจ ansible (ไม่ใช่ ansible-core) มี community.general กับ ansible.posix มาให้ด้วย
+#    ถ้าเปลี่ยนไปใช้ ansible-core ต้องสั่ง ansible-galaxy ติดตั้ง collection เอง
+# ตรวจเวอร์ชันล่าสุดจาก PyPI เมื่อ 2026-08-28
+ansible==14.3.1
+ansible-lint==26.8.0

@@ -31,14 +31,13 @@ jobs:
 
       - name: ติดตั้ง Ansible
         run: |
-          # แพ็กเกจ ansible (ไม่ใช่ ansible-core) มี community.general กับ ansible.posix มาด้วย
-          pip install ansible
+          # เวอร์ชันล็อกไว้ใน requirements.txt เพื่อให้ CI ให้ผลเหมือนเดิมทุกครั้ง
+          pip install -r requirements.txt
           ansible --version | head -2
           ansible-galaxy collection list 2>/dev/null | grep -E 'community.general|ansible.posix' || true
 
       - name: ตรวจไวยากรณ์และกฎการเขียน
         run: |
-          pip install ansible-lint
           cd ansible
           ansible-playbook --syntax-check -i localhost, -c local harden.yml -e "ssh_pubkey=dummy-key-for-syntax-check-only"
           # ⚠️ ปล่อยให้ lint เตือนได้ แต่ยังไม่บังคับให้ผ่าน เพราะกฎบางข้อเป็นเรื่องสไตล์
