@@ -1,0 +1,46 @@
+# ============================================================================
+# nginx + certbot — เว็บที่มีใบรับรองจริงจาก Let's Encrypt
+# ============================================================================
+# ⭐ ทำไมแยกเป็นสองคอนเทนเนอร์แทนที่จะยัดรวมกัน
+#    nginx ต้องรันตลอดเวลา ส่วน certbot ทำงานเป็นครั้งคราว
+#    ยัดรวมกันแปลว่าต้องรีสตาร์ตเว็บทุกครั้งที่ต่ออายุใบรับรอง
+#
+# ⛔ พอร์ต 80 ปิดไม่ได้แม้จะ redirect ไป https ทั้งหมด
+#    เพราะ Let's Encrypt ใช้พอร์ต 80 ตรวจว่าเราคุมโดเมนนี้จริง
+#    ปิดเมื่อไหร่ = ต่ออายุใบรับรองไม่ได้ = เว็บพังใน 90 วัน
+
+services:
+  nginx:
+    image: nginx:1.29-alpine
+    container_name: web-nginx
+    restart: unless-stopped
+    # ⚠️ สองพอร์ตนี้คือพอร์ตเดียวที่ DOCKER-USER อนุญาตให้เข้าถึงจากภายนอก
+    #    ถ้าจะเพิ่มพอร์ตอื่น ต้องแก้ docker-firewall.sh ด้วย ไม่งั้นจะงงว่าทำไมต่อไม่ติด
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./html:/usr/share/nginx/html:ro
+      - certbot-conf:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    # ⭐ nginx โหลดค่าใหม่ทุก 6 ชั่วโมง เพื่อรับใบรับรองที่ certbot เพิ่งต่ออายุ
+    #    ถ้าไม่ทำ ใบรับรองจะถูกต่ออายุแล้วแต่ nginx ยังใช้ใบเก่าจนหมดอายุ
+    command: >-
+      /bin/sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: web-certbot
+    restart: unless-stopped
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    # ⭐ ลองต่ออายุทุก 12 ชั่วโมง certbot จะไม่ทำอะไรถ้ายังไม่ใกล้หมดอายุ
+    #    Let's Encrypt แนะนำให้ลองบ่อยกว่าที่จำเป็น เผื่อวันไหนล้มจะได้มีโอกาสแก้ตัว
+    entrypoint: >-
+      /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+
+volumes:
+  certbot-conf:
+  certbot-www:

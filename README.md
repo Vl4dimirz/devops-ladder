@@ -339,6 +339,90 @@ self-hosted on a machine with no managed backups of its own. For a team, HCP Ter
 S3 with versioning is the right answer; this one is honest about being a single-operator
 setup that demonstrates the mechanism.
 
+## `web/` and `docker-firewall.sh` — Docker walks straight through ufw
+
+Running a container publishes its ports by having Docker write iptables rules directly,
+and those rules land **before** ufw's in the FORWARD chain:
+
+```
+-A FORWARD -j DOCKER-USER          <- Docker
+-A FORWARD -j DOCKER-FORWARD       <- Docker
+-A FORWARD -j ufw-before-forward   <- ufw, too late
+```
+
+So `docker run -p 8080:80` makes 8080 reachable from the internet while `ufw status` still
+lists it as closed. Nothing warns you. On this host it was reachable — HTTP 200 from
+outside with zero ufw rules permitting it.
+
+**The only thing that had it covered was the cloud firewall added an hour earlier.** That
+is what defence in depth looks like when it actually pays: the layer everyone treats as
+redundant turned out to be the only one doing the work.
+
+### The fix that looked right and wasn't
+
+Docker leaves the `DOCKER-USER` chain for exactly this, evaluated before its own rules. The
+first attempt was:
+
+```
+-A DOCKER-USER -i eth0 -p tcp -m multiport --dports 80,443 -j RETURN
+-A DOCKER-USER -i eth0 -j DROP
+```
+
+Correct chain, correct order, and it let the 8080 traffic straight through. The counters
+said so plainly — the allow rule had one packet, the DROP had none.
+
+DNAT happens in PREROUTING, before FORWARD. By the time a packet reaches `DOCKER-USER` the
+destination port has already been rewritten from the published port to the container port,
+8080 → 80, so a rule matching `--dports 80` matches traffic that arrived on 8080. The
+comparison has to be against the pre-NAT port, which conntrack still remembers:
+
+```
+-m conntrack --ctorigdstport 80 -j RETURN
+```
+
+Same test afterwards, opposite result: 200 from the internet before, connection dropped
+after, container still answering on localhost. The rules are reapplied by a systemd unit
+bound to `docker.service`, so they survive both a reboot and a Docker restart.
+
+### nginx and a real certificate
+
+`web/` runs nginx and certbot as separate containers — nginx has to stay up, certbot works
+occasionally, and combining them means restarting the site on every renewal. Port 80 stays
+open even though everything redirects, because Let's Encrypt validates over it; close it
+and renewal quietly stops working until the certificate expires ninety days later.
+
+Verified from a host with no TLS interception in the path:
+
+```
+0  CN = demo.inksverse.com
+1  C = US, O = Let's Encrypt, CN = YE2
+2  C = US, O = ISRG, CN = Root YE
+3  C = US, O = ISRG, CN = ISRG Root X2
+
+TLSv1.3 / TLS_AES_256_GCM_SHA384      http -> 301 -> https
+```
+
+⚠️ That qualifier matters. Read from a workstation running Norton, the same connection
+reports `issuer = Norton Web/Mail Shield Root`, and a Python scanner fails outright with
+`CERTIFICATE_VERIFY_FAILED` because Python carries its own CA bundle rather than using the
+Windows store. **TLS testing from behind a TLS-intercepting proxy measures the proxy.**
+Both the chain above and the scan below were run from a third machine for that reason.
+
+### Scanning it with our own scanner
+
+[raidkit](https://github.com/Vl4dimirz/raidkit) refuses to run without `--authorized`,
+which is its own gate and the right default. Against this host:
+
+```
+1 finding    CRITICAL: 0  HIGH: 0  MEDIUM: 0  LOW: 1  INFO: 0
+LOW  headers  Version/tech disclosed in 'server' header — server: nginx
+```
+
+Accepted rather than fixed, and worth saying why: `server_tokens off` already removes the
+version, and removing the header entirely needs the `headers_more` module, which means a
+different base image. The disclosure is that the site runs nginx, which its behaviour makes
+obvious anyway. Recorded as known rather than quietly dropped.
+
 ## Status
 
 - **`harden.sh`** — runs on a real Ubuntu VM in CI on every push, and end to end against an
@@ -377,4 +461,7 @@ than removing the conflict.
 - [x] Terraform for the infrastructure: the existing droplet imported under management,
       plus a cloud firewall proven to filter independently of `ufw`
 - [x] Remote state on a separate host, with the lock proven and a nightly backup
+- [x] Docker, nginx and a real Let's Encrypt certificate, with Docker's firewall bypass
+      found and closed
 - [ ] Move state to versioned object storage, so every write can be rolled back
+- [ ] CI/CD that deploys to the server, and monitoring that says when it stops
