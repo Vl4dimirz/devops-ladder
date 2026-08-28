@@ -1,0 +1,83 @@
+name: รัน harden.sh กับเครื่องจริงแล้วตรวจผล
+
+# ⭐⭐ ทำไมรันบนตัว runner โดยตรง ไม่ใช่ใน container
+#
+#    สิ่งที่ harden.sh ทำมีสามอย่างที่ container ทำไม่ได้จริง
+#      · systemctl restart ssh   ต้องมี systemd
+#      · ufw --force enable      ต้องแก้ netfilter ของเคอร์เนล
+#      · systemctl enable fail2ban
+#    ถ้ารันใน container ธรรมดา สามข้อนี้จะล้มหรือทำงานแบบหลอกๆ
+#    แล้วเราจะได้ CI สีเขียวที่ไม่ได้พิสูจน์อะไรเลย
+#
+#    ตัว runner ของ GitHub คือ Ubuntu VM จริง มี systemd มี sshd มีสิทธิ์ root
+#    และถูกทำลายทิ้งทุกครั้งที่งานจบ = เครื่องทดสอบที่พังได้โดยไม่มีใครเดือดร้อน
+#
+# ⛔ ห้ามชี้ workflow นี้ไปที่เครื่องที่มีคนใช้งานจริงเด็ดขาด
+#    มันปิดการล็อกอินด้วยรหัสผ่านและปิดการล็อกอินเป็น root แบบถาวร
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+
+    env:
+      TEST_USER: deploy
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: บอกให้รู้ว่ากำลังทดสอบบนอะไร
+        run: |
+          . /etc/os-release
+          echo "ระบบปฏิบัติการ : $PRETTY_NAME"
+          echo "เคอร์เนล        : $(uname -r)"
+          echo "systemd         : $(systemctl --version | head -1)"
+          echo "sshd            : $(sshd -V 2>&1 | head -1 || ssh -V 2>&1)"
+
+      # ⭐⭐ ขั้นนี้คือหัวใจ และเป็นขั้นที่คนข้ามกันหมด
+      #    ถ้าไม่พิสูจน์ก่อนว่าตัวตรวจ "จับเครื่องที่ยังไม่ได้ทำได้"
+      #    เราจะไม่มีทางรู้เลยว่าสีเขียวตอนท้ายมาจากการ harden สำเร็จ
+      #    หรือมาจากตัวตรวจที่ตอบผ่านทุกกรณี
+      - name: ก่อน harden ตัวตรวจต้องไม่ผ่าน (ตัวควบคุมด้านลบ)
+        run: |
+          chmod +x verify-hardening.sh
+          if sudo bash verify-hardening.sh "$TEST_USER"; then
+            echo ""
+            echo "!! ตัวตรวจผ่านทั้งที่ยังไม่ได้ harden อะไรเลย"
+            echo "!! แปลว่าตัวตรวจไม่ได้ตรวจอะไรจริง ผลสีเขียวตอนท้ายจะไม่มีความหมาย"
+            exit 1
+          fi
+          echo ""
+          echo "ok: ตัวตรวจจับเครื่องที่ยังไม่ได้ harden ได้ตามที่ควรเป็น"
+
+      - name: สร้างกุญแจ SSH ใช้ครั้งเดียวสำหรับการทดสอบ
+        run: |
+          # ⛔ กุญแจนี้เกิดและตายพร้อมกับงานนี้ ไม่มีอะไรเก็บไว้ที่ไหน
+          ssh-keygen -t ed25519 -N "" -C "ci-throwaway" -f /tmp/ci_key
+          echo "ลายนิ้วมือกุญแจ: $(ssh-keygen -lf /tmp/ci_key.pub)"
+
+      - name: รัน harden.sh กับเครื่องจริง
+        run: |
+          chmod +x harden.sh
+          sudo bash harden.sh "$TEST_USER" "$(cat /tmp/ci_key.pub)"
+
+      - name: หลัง harden ตัวตรวจต้องผ่านครบ
+        run: sudo bash verify-hardening.sh "$TEST_USER"
+
+      # เก็บหลักฐานไว้อ่านย้อนหลัง เผื่อวันหลังมีคนถามว่าตอนนั้นเครื่องเป็นยังไง
+      - name: เก็บสภาพเครื่องหลัง harden
+        if: always()
+        run: |
+          echo "===== ค่าที่ sshd ใช้จริง ====="
+          sudo sshd -T 2>/dev/null | grep -iE '^(permitrootlogin|passwordauthentication|pubkeyauthentication|kbdinteractiveauthentication)' || true
+          echo ""
+          echo "===== ufw ====="
+          sudo ufw status verbose || true
+          echo ""
+          echo "===== fail2ban ====="
+          sudo fail2ban-client status || true
