@@ -290,6 +290,55 @@ the moment it attaches. Omit the outbound rules and the droplet loses the intern
 DNS and unattended upgrades all stop, and the machine looks broken for no visible reason.
 `ufw` allows outbound by default, so the habit does not carry across.
 
+### Remote state, and proving the lock
+
+State moved off the disk into a Postgres running on the second machine — a different
+provider in a different country from the droplet the state describes. If the state lived
+on the same box it manages, it would still disappear with that box, which is one of the
+things moving it is supposed to fix.
+
+Postgres rather than object storage, because **the point of remote state is not where the
+file sits, it is who is allowed to write to it right now.** Two people running `apply` at
+the same time corrupt the file, and Terraform then no longer knows what belongs to it —
+it can build duplicates, or delete something still in use. A database already has locking;
+S3 traditionally needed DynamoDB bolted on to provide it.
+
+Whether the lock works is testable, so it was tested. Two plans launched a second apart:
+
+```
+A finished rc=0        <- took the lock
+B finished rc=1        <- refused
+
+Error: Error acquiring the state lock
+  ID:        2763dde5-ec5a-50a8-146d-df6a41023695
+  Operation: OperationTypePlan
+  Who:       deploy@ladder-01
+```
+
+It names the holder, which is what makes the message useful at 3am rather than merely
+correct.
+
+Then the local state files were moved aside entirely. `terraform state list` still returns
+both resources and `plan` reports `No changes`, so the source of truth really did move
+rather than being duplicated.
+
+The connection requires SSL and Postgres confirms what it negotiated:
+
+```
+ssl | version | cipher
+ t  | TLSv1.3 | TLS_AES_256_GCM_SHA384
+```
+
+Port 5432 is open to one address, `/32`, with `hostssl ... scram-sha-256` in `pg_hba.conf`.
+A database holding the map of everything you manage should not be reachable by anyone else.
+
+⚠️ Two honest gaps. The `pg` backend keeps no version history — S3 with versioning rolls
+back every write, and this does not — so `backup-tfstate.sh` runs nightly and keeps
+fourteen days, which is the only thing standing in for that. And the database is
+self-hosted on a machine with no managed backups of its own. For a team, HCP Terraform or
+S3 with versioning is the right answer; this one is honest about being a single-operator
+setup that demonstrates the mechanism.
+
 ## Status
 
 - **`harden.sh`** — runs on a real Ubuntu VM in CI on every push, and end to end against an
@@ -307,7 +356,8 @@ DNS and unattended upgrades all stop, and the machine looks broken for no visibl
   fail2ban test, with a control probe against a reserved address so a hijacked path is
   reported as untrustworthy rather than as a finding
 - **`terraform/`** — one droplet imported, one cloud firewall created, `prevent_destroy` on
-  both. State is local, which is fine for one operator and wrong for a team
+  both. State lives in Postgres on a second machine, over TLS 1.3, with the lock verified
+  by two concurrent runs and a nightly dump kept for fourteen days
 - **`oci-grab-vm.sh`** — exercised against the live OCI API, never reached a running VM.
   Singapore has had no Always-Free capacity for either shape, and Always Free is locked to
   your home region, so there is nowhere else to try. Payment is not the blocker
@@ -326,4 +376,5 @@ than removing the conflict.
 - [ ] Leave it running for a month and re-verify, to catch drift rather than mistakes
 - [x] Terraform for the infrastructure: the existing droplet imported under management,
       plus a cloud firewall proven to filter independently of `ufw`
-- [ ] Remote state, so the state file does not live on one machine
+- [x] Remote state on a separate host, with the lock proven and a nightly backup
+- [ ] Move state to versioned object storage, so every write can be rolled back
