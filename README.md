@@ -149,8 +149,8 @@ The `sshd -T` assertion from bug 1 is carried over intact: the playbook writes
 - **`verify-hardening.sh`** — 21 checks and 3 warnings, with a negative control proving it
   detects an unhardened machine
 - **`oci-grab-vm.sh`** — exercised against the live OCI API, never reached a running VM.
-  Singapore had no Always-Free capacity for either shape, and the billing step rejected my
-  card when I tried to unlock capacity through a paid account
+  Singapore has had no Always-Free capacity for either shape, and Always Free is locked to
+  your home region, so there is nowhere else to try. Payment is not the blocker
 
 The warnings are worth reading rather than clearing: the vendor drop-in that caused bug 1
 is still on disk. Our file currently wins on name order, and that is a weaker guarantee
