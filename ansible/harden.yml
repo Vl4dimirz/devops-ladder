@@ -45,10 +45,14 @@
     # ⭐ handler ทำงานเฉพาะตอนมีอะไรเปลี่ยนจริง
     #    นี่คือเหตุผลหลักที่ไม่ใช้ command: เขียนทุกอย่าง
     #    รีสตาร์ต sshd ทุกครั้งที่รัน playbook = ตัดคนที่กำลังต่ออยู่ทิ้งโดยไม่จำเป็น
-    - name: restart ssh
+    # ⛔ ต้องเป็น reloaded ไม่ใช่ restarted
+    #    restarted ฆ่า sshd ที่ถือเซสชันของ Ansible อยู่ ทำให้ playbook ตายกลางทาง
+    #    เจอกับตัวบนเครื่องจริง 2026-08-28 ตอนรัน harden.sh ผ่าน SSH
+    #    reloaded ส่ง SIGHUP ให้ sshd อ่านค่าใหม่โดยไม่ตัดการเชื่อมต่อที่มีอยู่
+    - name: reload ssh
       ansible.builtin.service:
         name: ssh
-        state: restarted
+        state: reloaded
 
   tasks:
     # ── 1. อัปเดตระบบ ──────────────────────────────────────────────────
@@ -118,7 +122,7 @@
           PasswordAuthentication no
           PubkeyAuthentication yes
           KbdInteractiveAuthentication no
-      notify: restart ssh
+      notify: reload ssh
 
     - name: "[4] แก้ไฟล์หลักด้วย เผื่อเครื่องรุ่นเก่าที่ไม่มีบรรทัด Include"
       ansible.builtin.lineinfile:
@@ -131,7 +135,7 @@
         - { key: "PermitRootLogin", value: "no" }
         - { key: "PasswordAuthentication", value: "no" }
         - { key: "PubkeyAuthentication", value: "yes" }
-      notify: restart ssh
+      notify: reload ssh
       # ⭐ lineinfile ต่างจาก sed ตรงที่มันบอกได้ว่าเปลี่ยนอะไรจริงหรือเปล่า
       #    sed คืนค่าสำเร็จเสมอแม้ไม่มีบรรทัดไหนตรงเลย ซึ่งเป็นสาเหตุที่บั๊กเดิมเงียบสนิท
 

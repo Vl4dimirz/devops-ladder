@@ -155,6 +155,20 @@ else
   ok "ไม่มีไฟล์ใน sshd_config.d ให้ต้องกังวล"
 fi
 
+# ⭐⭐ ด่านนี้เพิ่มหลังเจอของจริง 2026-08-28 และแทบไม่มีใครตรวจ
+#    เครื่องที่ harden แล้วแต่ล็อกอินไม่ได้หลังรีบูต ก็คือก้อนอิฐ
+#    Ubuntu 24.04 ขึ้นไปยกพอร์ต 22 ให้ ssh.socket ถือ ไม่ใช่ ssh.service
+#    และ ssh.service ถูกตั้งเป็น disabled มาแต่แรก ซึ่งถูกต้องแล้ว
+#    ⛔ แต่ถ้ามีใครไปปิด ssh.socket เพราะเห็นว่า service ก็ disabled อยู่แล้ว
+#       เครื่องจะไม่มีอะไรฟังพอร์ต 22 เลยหลังรีบูตครั้งถัดไป
+if systemctl is-enabled ssh.socket >/dev/null 2>&1; then
+  ok "ssh.socket ตั้งให้เปิดตอนบูต (Ubuntu 24.04+ ใช้แบบนี้)"
+elif systemctl is-enabled ssh >/dev/null 2>&1 || systemctl is-enabled sshd >/dev/null 2>&1; then
+  ok "ssh.service ตั้งให้เปิดตอนบูต"
+else
+  bad "ไม่มีทั้ง ssh.socket และ ssh.service ที่เปิดตอนบูต = รีบูตแล้วเข้าเครื่องไม่ได้"
+fi
+
 # ── 5. ไฟร์วอลล์ ──────────────────────────────────────────────────────────
 head_ "[5] ไฟร์วอลล์ ufw"
 UFW=$(ufw status verbose 2>/dev/null)

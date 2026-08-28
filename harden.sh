@@ -104,7 +104,13 @@ sshd -t
 # success and leaving the door open.
 for PAIR in "permitrootlogin no" "passwordauthentication no" "pubkeyauthentication yes"; do
   KEY="${PAIR%% *}"; WANT="${PAIR##* }"
-  GOT="$(sshd -T | awk -v k="$KEY" 'tolower($1)==k {print tolower($2); exit}')"
+  # ⛔ ห้ามใช้ awk ที่ exit กลางทาง หรือ `| head -1` ตรงนี้
+  #    ตัวรับท่อที่ปิดตัวเองก่อน ทำให้ sshd โดน SIGPIPE
+  #    แล้ว `set -o pipefail` เห็นเป็นความล้มเหลว `set -e` จึงฆ่าสคริปต์ทิ้ง
+  #    อาการคือสคริปต์ตายเงียบๆ ที่ขั้นนี้ด้วย exit code 141 (128+13)
+  #    เจอบนเครื่องจริง 2026-08-28 ขั้นที่ 5-7 เลยไม่เคยถูกรันเลยสองรอบ
+  #    ⭐ ให้ awk อ่านจนจบแล้วค่อยพิมพ์ใน END แทน ไม่มีใครปิดท่อก่อน
+  GOT="$(sshd -T | awk -v k="$KEY" 'tolower($1)==k {v=tolower($2)} END {print v}')"
   if [ "$GOT" != "$WANT" ]; then
     echo "ABORT: sshd resolves $KEY to '${GOT:-nothing}', expected '$WANT'." >&2
     echo "Something in /etc/ssh/sshd_config.d/ is overriding it:" >&2
@@ -113,7 +119,36 @@ for PAIR in "permitrootlogin no" "passwordauthentication no" "pubkeyauthenticati
   fi
 done
 
-systemctl restart ssh 2>/dev/null || systemctl restart sshd
+# ---------------------------------------------------------------------------
+# ⛔ Do NOT `systemctl restart ssh` here.
+#
+# Restarting kills the sshd process that owns your session, so if you are
+# running this over SSH — which is how a remote server is always set up — the
+# script dies here and steps 5-7 never run. Found on a real box on 2026-08-28:
+# the firewall and fail2ban were silently never installed, and the log showed
+# sshd stopped for two minutes with nothing running to start it again.
+#
+# It only recovered because Ubuntu 24.04 enables `ssh.socket`, which listens on
+# port 22 and starts ssh.service on demand. On a host without socket activation
+# that is a permanent lockout with no way back in except the provider's console.
+#
+# `reload` sends SIGHUP: sshd re-reads its configuration and keeps every
+# established connection. It is the correct verb for a config change, and the
+# restart below is only a fallback for the case where sshd is not running.
+# ---------------------------------------------------------------------------
+if ! systemctl reload ssh 2>/dev/null && ! systemctl reload sshd 2>/dev/null; then
+  echo "reload failed, falling back to restart (this may drop your session)" >&2
+  systemctl restart ssh 2>/dev/null || systemctl restart sshd
+fi
+
+# On Ubuntu 24.04+ port 22 is held by ssh.socket, not by ssh.service. Make sure
+# whichever one owns the port comes back after a reboot: a hardened box you
+# cannot log into after a restart is just a brick.
+if systemctl list-unit-files ssh.socket >/dev/null 2>&1; then
+  systemctl enable ssh.socket >/dev/null 2>&1 || true
+else
+  systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
+fi
 
 echo "[5/7] Firewall (ufw): allow SSH + HTTP + HTTPS, deny the rest"
 apt-get install -y ufw
