@@ -3,8 +3,9 @@
 Two scripts from a DevSecOps ladder: secure a fresh Linux box before anything is exposed,
 and get hold of a free Oracle Cloud VM when the region has no capacity.
 
-**Read this first:** `harden.sh` has never been run against a real server. See
-[Status](#status) before you judge it as production-tested, because it is not.
+`harden.sh` now runs against a real Ubuntu VM on every push, and every control it
+claims to set is verified against the running system afterwards. That pipeline found
+two real bugs on its first three runs; both are described below.
 
 ## `harden.sh` — first ten minutes on a fresh Ubuntu box
 
@@ -53,25 +54,72 @@ export OCI_TENANCY="<your compartment OCID>"
 ./oci-grab-vm.sh
 ```
 
+## `verify-hardening.sh` — checking the result instead of the exit code
+
+`harden.sh` has `set -e`, which only tells you that no command returned an error. That is
+a different question from whether the machine is actually harder to break into.
+
+The verifier answers the second question, by reading the state of the running system:
+
+| Area | What is checked |
+| --- | --- |
+| Automatic updates | `unattended-upgrades` installed **and** switched on in `20auto-upgrades` |
+| Non-root user | exists, is in `sudo`, and its `sudoers.d` file is mode 440 — `sudo` silently ignores the whole file if it is not |
+| SSH key | `.ssh` 700, `authorized_keys` 600 and owned by the user, and parseable as a key — sshd refuses a too-permissive file without saying why |
+| sshd | read from `sshd -T`, the config sshd actually resolves, not from the file that was just edited |
+| Firewall | `ufw` active, default deny in, allow out, ports 22/80/443 open |
+| fail2ban | service active **and** a jail actually watching ssh — a running fail2ban with no jail bans nobody |
+
+CI runs it **before** hardening as well, and fails the build if it passes there. Without
+that step, a verifier that returns success unconditionally would look identical to a
+working one. On the current runner it reports 19 failures before and 0 after.
+
+## The two bugs CI found
+
+**1. Password login was never actually disabled.** The script edited
+`/etc/ssh/sshd_config` with `sed`, printed *"password login is now OFF"*, and exited 0.
+`sshd -T` said `passwordauthentication yes`.
+
+Ubuntu's stock config opens with `Include /etc/ssh/sshd_config.d/*.conf`, and sshd takes
+the **first** value it sees for a keyword rather than the last. Every file in that
+directory is therefore read before the body of the main file and wins. Ubuntu cloud images
+ship one — `50-cloud-init.conf` on the runner, `60-cloudimg-settings.conf` elsewhere —
+containing `PasswordAuthentication yes`.
+
+`sed` reports success whether or not it matched anything, so nothing looked wrong. The
+script now writes `/etc/ssh/sshd_config.d/00-hardening.conf`, which sorts ahead of the
+vendor file, still patches the main file for older images with no `Include`, and then
+**refuses to restart sshd unless `sshd -T` resolves to the values it set** — naming the
+conflicting file if it does not.
+
+This one matters beyond this repository: it is the most-attacked surface on a new box, the
+failure is silent, and the same drop-in exists on DigitalOcean, AWS, Oracle Cloud and
+Hetzner images.
+
+**2. `sshd -t` fails when sshd is not running.** It needs `/run/sshd`, a tmpfs directory
+systemd creates through `RuntimeDirectory=sshd`, so it is absent for the moment after apt
+upgrades `openssh-server` in step 1. The script creates it before validating, which is
+what the service unit does anyway.
+
 ## Status
 
-`oci-grab-vm.sh` ran for real against Oracle Cloud. It discovered the availability domain,
-image and subnet correctly and looped on capacity as designed.
+- **`harden.sh`** — runs on a real Ubuntu VM in CI on every push, all 21 checks passing.
+  Not yet run against a long-lived internet-facing host, which is a different thing: no
+  reboot, no persistence across days, no real attack traffic
+- **`verify-hardening.sh`** — 21 checks and 3 warnings, with a negative control proving it
+  detects an unhardened machine
+- **`oci-grab-vm.sh`** — exercised against the live OCI API, never reached a running VM.
+  Singapore had no Always-Free capacity for either shape, and the billing step rejected my
+  card when I tried to unlock capacity through a paid account
 
-It never returned an instance. Singapore had no capacity for either the ARM or the AMD
-Always-Free shape, and when I moved to unlock capacity through a paid account, the billing
-step rejected my card. So:
-
-- **`oci-grab-vm.sh`** — exercised against the live OCI API, never reached a running VM
-- **`harden.sh`** — written and reviewed, **never executed against a server**
-
-I am publishing it in that state on purpose. A hardening script that claims to be
-battle-tested when it has only ever been read is worse than one that says where it stands.
-When I have a box, the next commit will say so.
+The warnings are worth reading rather than clearing: the vendor drop-in that caused bug 1
+is still on disk. Our file currently wins on name order, and that is a weaker guarantee
+than removing the conflict.
 
 ## Roadmap
 
 - [x] R1 write the hardening script
-- [ ] R1 run it against a real remote box and re-scan with [raidkit](https://github.com/Vl4dimirz/raidkit)
-- [ ] Convert `harden.sh` to an Ansible playbook tested against a container in CI
+- [x] R1 run it against a real machine, with each control verified afterwards
+- [ ] Run against a long-lived VPS and confirm the settings survive a reboot
+- [ ] Convert `harden.sh` to an Ansible playbook, tested by the same verifier
 - [ ] Terraform for the infrastructure instead of console clicks
