@@ -217,6 +217,27 @@ eight-second timeout, because the ICMP is filtered somewhere in between. The fir
 states an intention; the path decides the outcome. `drop` is the better choice anyway —
 it tells a scanner nothing and costs it a full timeout on every attempt.
 
+## The vendor drop-in, caught in the wild
+
+Bug 1 above was found on a GitHub runner. Running the playbook against a Thai VPS
+confirmed it is not an artifact of CI:
+
+```
+thai-01   /etc/ssh/sshd_config.d/50-cloud-init.conf : PasswordAuthentication yes
+thai-01   /etc/ssh/sshd_config.d/00-hardening.conf  : PermitRootLogin no
+thai-01   sshd -T                                   : passwordauthentication no
+```
+
+The provider's image ships `PasswordAuthentication yes`. Our drop-in sorts ahead of it and
+wins, so `sshd -T` resolves to `no`. The original script, which only ran `sed` over the
+main file, would have left password login enabled on that host — a box with no provider
+console, reachable from the internet, whose only recovery path is a phone call.
+
+The same check on the DigitalOcean droplet raises no warning at all: its cloud-init
+drop-in says `no`, because the droplet was created with an SSH key. Two hosts, same
+distribution, opposite vendor defaults. Which is the argument for reading `sshd -T`
+instead of trusting any assumption about what is in that directory.
+
 ## Status
 
 - **`harden.sh`** — runs on a real Ubuntu VM in CI on every push, and end to end against an
@@ -225,8 +246,9 @@ it tells a scanner nothing and costs it a full timeout on every attempt.
 - ⚠️ Still not proven across days or a provider maintenance window; "survives one reboot" is
   not the same as "survives a month"
 - **`ansible/harden.yml`** — same six controls, verified by the same script, and proven
-  idempotent: second run reports `changed=0`. Tested only against `localhost` with
-  `connection: local`, never over SSH to a remote inventory
+  idempotent against **two real hosts at different providers in different countries**,
+  driven over SSH from a control node: `changed=5` and `changed=10` on the first run,
+  `changed=0` on both for the second
 - **`verify-hardening.sh`** — 23 checks, with a negative control proving it detects an
   unhardened machine, and a check that port 22 will still be served after a reboot
 - **`check-from-outside.sh`** — port state, SSH as an outsider sees it, and an opt-in
@@ -245,7 +267,7 @@ than removing the conflict.
 - [x] R1 write the hardening script
 - [x] R1 run it against a real machine, with each control verified afterwards
 - [x] Convert `harden.sh` to an Ansible playbook, tested by the same verifier and proven
-      idempotent in CI
+      idempotent in CI and against two real hosts from one control node
 - [x] Run against a real internet-facing VPS and confirm the settings survive a reboot
 - [ ] Leave it running for a month and re-verify, to catch drift rather than mistakes
 - [ ] Terraform for the infrastructure instead of console clicks
