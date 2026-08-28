@@ -128,9 +128,11 @@ check_sshd pubkeyauthentication yes
 
 # ⚠️ ข้อนี้จับกับดักที่ตั้งใจดักไว้: ไฟล์หลักถูกแก้แล้ว แต่ include ทับกลับ
 if [ -d /etc/ssh/sshd_config.d ] && ls /etc/ssh/sshd_config.d/*.conf >/dev/null 2>&1; then
-  if grep -riqE '^\s*(PasswordAuthentication\s+yes|PermitRootLogin\s+(yes|prohibit-password))' \
-       /etc/ssh/sshd_config.d/ 2>/dev/null; then
-    bad "มีไฟล์ใน sshd_config.d ที่เปิดสิ่งที่เราเพิ่งปิด (Include อยู่บนสุด ค่าแรกชนะ)"
+  CULPRITS=$(grep -riEl '^\s*(PasswordAuthentication\s+yes|PermitRootLogin\s+(yes|prohibit-password))' \
+       /etc/ssh/sshd_config.d/ 2>/dev/null | tr '\n' ' ')
+  if [ -n "$CULPRITS" ]; then
+    bad "มีไฟล์ที่เปิดสิ่งที่เราเพิ่งปิด: $CULPRITS"
+    bad "  (Include อยู่บนสุดของ sshd_config และ sshd ใช้ค่าแรกที่เจอ ไฟล์พวกนี้จึงชนะ)"
   else
     ok "ไม่มีไฟล์ใน sshd_config.d ที่ย้อนค่ากลับ"
   fi

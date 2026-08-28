@@ -45,11 +45,63 @@ chmod 600 "/home/$USER_NAME/.ssh/authorized_keys"
 chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.ssh/authorized_keys"
 
 echo "[4/7] Hardening SSH (key-only, no root)..."
+# ---------------------------------------------------------------------------
+# Editing /etc/ssh/sshd_config alone DOES NOT WORK on a modern Ubuntu image.
+#
+# The stock file begins with:
+#     Include /etc/ssh/sshd_config.d/*.conf
+# and sshd takes the FIRST value it sees for a keyword, not the last. So every
+# file in that directory is read before the rest of the main file and wins.
+#
+# Ubuntu cloud images ship /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
+# containing `PasswordAuthentication yes`. Every provider built on those images
+# has it: DigitalOcean, AWS, Oracle Cloud, Hetzner, and the GitHub Actions
+# runner this script is tested on.
+#
+# Caught in CI on 2026-08-28. The old version of this script ran to completion,
+# printed "password login is now OFF", and left password login ON. sed reports
+# success whether or not it changed anything, so nothing looked wrong.
+#
+# The fix is to drop our own file in that directory with a name that sorts
+# FIRST, so it wins the first-match rule, and then to verify the result against
+# `sshd -T` — the config sshd actually resolves — before restarting anything.
+# ---------------------------------------------------------------------------
 SSHD=/etc/ssh/sshd_config
-sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/'          "$SSHD"
+DROPIN=/etc/ssh/sshd_config.d/00-hardening.conf
+
+install -d -m 755 /etc/ssh/sshd_config.d
+cat > "$DROPIN" <<'SSHD_CONF'
+# Written by harden.sh. Named 00- so it is read before any vendor drop-in;
+# sshd uses the first value it finds for each keyword.
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+KbdInteractiveAuthentication no
+SSHD_CONF
+chmod 644 "$DROPIN"
+
+# Also patch the main file, for older images that have no Include line at all.
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/'              "$SSHD"
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD"
 sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/'    "$SSHD"
-sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$SSHD"
+
+# Refuse to restart on a config sshd cannot parse: a bad restart locks you out.
+sshd -t
+
+# Verify the resolved config before touching the running service. If a vendor
+# drop-in still wins, stop here with the file named, rather than reporting
+# success and leaving the door open.
+for PAIR in "permitrootlogin no" "passwordauthentication no" "pubkeyauthentication yes"; do
+  KEY="${PAIR%% *}"; WANT="${PAIR##* }"
+  GOT="$(sshd -T | awk -v k="$KEY" 'tolower($1)==k {print tolower($2); exit}')"
+  if [ "$GOT" != "$WANT" ]; then
+    echo "ABORT: sshd resolves $KEY to '${GOT:-nothing}', expected '$WANT'." >&2
+    echo "Something in /etc/ssh/sshd_config.d/ is overriding it:" >&2
+    grep -riEl "^[[:space:]]*$KEY" /etc/ssh/sshd_config.d/ 2>/dev/null >&2 || true
+    exit 1
+  fi
+done
+
 systemctl restart ssh 2>/dev/null || systemctl restart sshd
 
 echo "[5/7] Firewall (ufw): allow SSH + HTTP + HTTPS, deny the rest"
