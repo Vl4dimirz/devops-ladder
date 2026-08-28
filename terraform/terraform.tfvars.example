@@ -1,0 +1,5 @@
+# ก๊อปเป็น terraform.tfvars แล้วใส่ค่าจริง
+# ดูค่าได้จากบนเครื่องเอง: curl http://169.254.169.254/metadata/v1/id
+droplet_id   = "000000000"
+droplet_name = "ladder-01"
+region       = "sgp1"

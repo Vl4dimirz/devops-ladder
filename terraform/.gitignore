@@ -1,0 +1,16 @@
+# ⛔⛔ ห้าม commit ไฟล์ state เด็ดขาด
+#    มันเก็บค่าทุกอย่างของทรัพยากรไว้เป็นข้อความธรรมดา
+#    รวมถึงค่าที่ประกาศเป็น sensitive ก็ยังอยู่ในนี้แบบอ่านได้
+#    ⚠️ และมันคือแหล่งความจริงของ Terraform ถ้าหายหรือเพี้ยน
+#       Terraform จะไม่รู้ว่าอะไรเป็นของมัน แล้วอาจเสนอสร้างซ้ำหรือลบทิ้ง
+terraform.tfstate
+terraform.tfstate.*
+*.tfstate.backup
+
+# ไฟล์ค่าตัวแปรจริง มีไอพีและชื่อเครื่องของจริง
+*.tfvars
+!*.tfvars.example
+
+.terraform/
+.terraform.lock.hcl
+crash.log

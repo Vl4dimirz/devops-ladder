@@ -238,6 +238,58 @@ drop-in says `no`, because the droplet was created with an SSH key. Two hosts, s
 distribution, opposite vendor defaults. Which is the argument for reading `sshd -T`
 instead of trusting any assumption about what is in that directory.
 
+## `terraform/` — adopting a server that already exists
+
+Most Terraform material starts from nothing and builds up. Real work rarely does: the
+infrastructure is already there, somebody clicked it into being, and the job is to bring it
+under management without disturbing it. So this configuration begins with an `import`
+block rather than a fresh `create`, which is harder — the code has to match the running
+resource exactly, or Terraform proposes to change it.
+
+**The first plan proposed to destroy the server.** One attribute was missing from the
+configuration:
+
+```
+~ monitoring = true -> false # forces replacement
+Plan: 1 to import, 1 to add, 0 to change, 1 to destroy
+```
+
+The droplet had monitoring enabled; the config omitted it, so Terraform read the default
+`false`, and that attribute cannot be changed in place. Its only route to the declared
+state was to delete the machine and build a new one — new IP, empty disk. The command
+typed was `plan`, and nothing in it asked for a deletion.
+
+`lifecycle { prevent_destroy = true }` is what stopped it, and it is the reason that line
+goes in from the first commit rather than after the first incident. The habit that goes
+with it: read the `Plan:` line before every apply, and stop if the destroy count is not
+zero.
+
+### Two firewalls, and proof they are independent
+
+The configuration also creates a DigitalOcean Cloud Firewall. It duplicates what `ufw`
+already enforces, which sounds redundant until you consider where each one runs: `ufw` is
+a process on the droplet, so anyone who takes the droplet can switch it off. The cloud
+firewall runs on the provider's network and cannot be reached from inside the machine at
+all.
+
+Whether that second layer does anything is testable rather than assumed. Opening 3306 in
+`ufw` alone, leaving the cloud firewall closed:
+
+```
+3306   ufw closed, cloud closed   -> filtered
+3306   ufw OPEN,   cloud closed   -> filtered     <- the network layer is doing the work
+80     ufw open,   cloud open     -> refused      <- the packet reached the kernel
+```
+
+`filtered` and `refused` are what separate the two layers. A filtered port never reached
+the machine; a refused one arrived and found nothing listening. The middle row is the
+whole argument for defence in depth, measured rather than asserted.
+
+⚠️ The trap on the way in: a DigitalOcean firewall denies **both directions** by default
+the moment it attaches. Omit the outbound rules and the droplet loses the internet — apt,
+DNS and unattended upgrades all stop, and the machine looks broken for no visible reason.
+`ufw` allows outbound by default, so the habit does not carry across.
+
 ## Status
 
 - **`harden.sh`** — runs on a real Ubuntu VM in CI on every push, and end to end against an
@@ -254,6 +306,8 @@ instead of trusting any assumption about what is in that directory.
 - **`check-from-outside.sh`** — port state, SSH as an outsider sees it, and an opt-in
   fail2ban test, with a control probe against a reserved address so a hijacked path is
   reported as untrustworthy rather than as a finding
+- **`terraform/`** — one droplet imported, one cloud firewall created, `prevent_destroy` on
+  both. State is local, which is fine for one operator and wrong for a team
 - **`oci-grab-vm.sh`** — exercised against the live OCI API, never reached a running VM.
   Singapore has had no Always-Free capacity for either shape, and Always Free is locked to
   your home region, so there is nowhere else to try. Payment is not the blocker
@@ -270,4 +324,6 @@ than removing the conflict.
       idempotent in CI and against two real hosts from one control node
 - [x] Run against a real internet-facing VPS and confirm the settings survive a reboot
 - [ ] Leave it running for a month and re-verify, to catch drift rather than mistakes
-- [ ] Terraform for the infrastructure instead of console clicks
+- [x] Terraform for the infrastructure: the existing droplet imported under management,
+      plus a cloud firewall proven to filter independently of `ufw`
+- [ ] Remote state, so the state file does not live on one machine
