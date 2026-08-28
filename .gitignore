@@ -1,3 +1,6 @@
-node_modules/
-.env
+*.retry
 .claude/
+.env
+__pycache__/
+ansible/inventory.ini
+node_modules/
