@@ -1,0 +1,215 @@
+---
+# ============================================================================
+# harden.yml — สิ่งเดียวกับ harden.sh แต่รันซ้ำได้โดยไม่เปลี่ยนอะไร
+# ============================================================================
+# ⭐ ทำไมต้องมีทั้งสองแบบ ไม่ใช่ทิ้ง harden.sh ไป
+#
+#    harden.sh  = เครื่องมือสำหรับสิบนาทีแรกของเครื่องใหม่ ก๊อปวางแล้วรันได้เลย
+#                 ไม่ต้องติดตั้งอะไรบนเครื่องปลายทาง
+#    harden.yml = เครื่องมือสำหรับเครื่องที่ต้องดูแลต่อไปเรื่อยๆ
+#                 รันซ้ำได้ทุกสัปดาห์ และบอกได้ว่ามีอะไรเปลี่ยนไปจากที่ตั้งไว้บ้าง
+#
+# ⛔⛔ กับดักที่ทำให้ playbook กลายเป็น shell script ห่อ YAML
+#    ถ้าใช้ command: หรือ shell: กับทุกอย่าง มันจะรายงาน changed ทุกครั้ง
+#    เสียประโยชน์ข้อเดียวที่ทำให้ Ansible คุ้มกับความยุ่งยากไป
+#    ⭐ ตัววัดว่าเขียนถูกคือ **รันรอบสองต้องได้ changed=0**
+#       ซึ่ง CI ในรีโปนี้บังคับไว้ ไม่ใช่แค่หวังว่าจะเป็นอย่างนั้น
+#
+# รัน:  ansible-playbook -i inventory.ini harden.yml -e "target_user=deploy" \
+#           -e "ssh_pubkey='ssh-ed25519 AAAA...'"
+# ============================================================================
+
+- name: เสริมความแข็งให้เครื่อง Ubuntu
+  hosts: all
+  become: true
+
+  vars:
+    target_user: deploy
+    # ⛔ ไม่มีค่าปริยาย ต้องส่งเข้ามาเสมอ ไม่งั้นจะได้เครื่องที่ล็อกอินไม่ได้เลย
+    # ssh_pubkey: "ssh-ed25519 AAAA..."
+    allowed_ports: [22, 80, 443]
+
+  pre_tasks:
+    - name: ต้องมีกุญแจ SSH ก่อนทำอะไรทั้งสิ้น
+      # ⭐ ตรวจก่อนแตะเครื่อง ไม่ใช่ไปพังตอนขั้นที่ 3
+      #    ถ้าปิดรหัสผ่านไปแล้วค่อยพบว่าไม่มีกุญแจ = ล็อกตัวเองออกถาวร
+      ansible.builtin.assert:
+        that:
+          - ssh_pubkey is defined
+          - ssh_pubkey | length > 20
+        fail_msg: >-
+          ต้องส่ง ssh_pubkey เข้ามา ไม่งั้นเมื่อปิดการล็อกอินด้วยรหัสผ่านแล้ว
+          จะไม่มีทางเข้าเครื่องได้อีกเลย
+
+  handlers:
+    # ⭐ handler ทำงานเฉพาะตอนมีอะไรเปลี่ยนจริง
+    #    นี่คือเหตุผลหลักที่ไม่ใช้ command: เขียนทุกอย่าง
+    #    รีสตาร์ต sshd ทุกครั้งที่รัน playbook = ตัดคนที่กำลังต่ออยู่ทิ้งโดยไม่จำเป็น
+    - name: restart ssh
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+  tasks:
+    # ── 1. อัปเดตระบบ ──────────────────────────────────────────────────
+    - name: "[1] อัปเดตรายชื่อแพ็กเกจและอัปเกรดของที่ค้าง"
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: safe
+        cache_valid_time: 3600
+      # ⚠️ upgrade: safe = ไม่ลบหรือเพิ่มแพ็กเกจเพื่อแก้ dependency
+      #    บนเครื่องที่มีคนใช้งานจริง full/dist อาจถอนของที่จำเป็นออก
+
+    # ── 2. ผู้ใช้ที่ไม่ใช่ root ─────────────────────────────────────────
+    - name: "[2] สร้างผู้ใช้ {{ target_user }} และใส่เข้ากลุ่ม sudo"
+      ansible.builtin.user:
+        name: "{{ target_user }}"
+        groups: sudo
+        append: true
+        shell: /bin/bash
+        password_lock: true
+        create_home: true
+      # ⭐ password_lock ไม่ใช่การตั้งรหัสว่าง แต่คือทำให้ล็อกอินด้วยรหัสไม่ได้เลย
+      #    ⛔ append: true สำคัญมาก ถ้าลืมใส่ ผู้ใช้จะหลุดจากกลุ่มอื่นที่เคยอยู่
+
+    - name: "[2] ให้สิทธิ์ sudo แบบไม่ต้องถามรหัส"
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/90-{{ target_user }}"
+        content: "{{ target_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        # ⭐⭐ ตรวจไวยากรณ์ก่อนเขียนทับของจริง
+        #    ไฟล์ sudoers ที่ผิดไวยากรณ์ทำให้ sudo ใช้ไม่ได้ทั้งเครื่อง
+        #    ซึ่งบนเครื่องที่ปิด root login ไว้แล้ว = กู้ไม่ได้
+        validate: "visudo -cf %s"
+
+    # ── 3. กุญแจ SSH ───────────────────────────────────────────────────
+    - name: "[3] ติดตั้งกุญแจสาธารณะให้ {{ target_user }}"
+      ansible.posix.authorized_key:
+        user: "{{ target_user }}"
+        key: "{{ ssh_pubkey }}"
+        state: present
+        exclusive: false
+      # ⚠️ exclusive: false = ไม่ลบกุญแจอื่นที่มีอยู่แล้วทิ้ง
+      #    ตั้ง true เมื่อไหร่ เพื่อนร่วมทีมที่เคยเข้าได้จะเข้าไม่ได้ทันทีโดยไม่มีใครบอก
+
+    # ── 4. ตั้งค่า sshd ────────────────────────────────────────────────
+    - name: "[4] เตรียมโฟลเดอร์ที่ sshd -t ต้องใช้"
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        mode: "0755"
+      # ⚠️ /run/sshd เป็น tmpfs ที่ systemd สร้างตอนสตาร์ตบริการ
+      #    จึงหายไปช่วงที่ sshd ไม่ได้รัน เช่นหลัง apt เพิ่งอัปเกรด openssh-server
+      #    แล้ว sshd -t จะฟ้อง Missing privilege separation directory (เจอใน CI 2026-08-28)
+
+    - name: "[4] เขียนไฟล์ตั้งค่าของเราให้เรียงมาก่อนของผู้ให้บริการ"
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # เขียนโดย Ansible (harden.yml) ห้ามแก้ด้วยมือ
+          # ตั้งชื่อขึ้นต้นด้วย 00 เพื่อให้ถูกอ่านก่อนไฟล์ของผู้ให้บริการ
+          # เพราะ sshd ใช้ค่าแรกที่เจอสำหรับแต่ละคำสั่ง ไม่ใช่ค่าสุดท้าย
+          PermitRootLogin no
+          PasswordAuthentication no
+          PubkeyAuthentication yes
+          KbdInteractiveAuthentication no
+      notify: restart ssh
+
+    - name: "[4] แก้ไฟล์หลักด้วย เผื่อเครื่องรุ่นเก่าที่ไม่มีบรรทัด Include"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?\\s*{{ item.key }}\\b"
+        line: "{{ item.key }} {{ item.value }}"
+        state: present
+        validate: "sshd -t -f %s"
+      loop:
+        - { key: "PermitRootLogin", value: "no" }
+        - { key: "PasswordAuthentication", value: "no" }
+        - { key: "PubkeyAuthentication", value: "yes" }
+      notify: restart ssh
+      # ⭐ lineinfile ต่างจาก sed ตรงที่มันบอกได้ว่าเปลี่ยนอะไรจริงหรือเปล่า
+      #    sed คืนค่าสำเร็จเสมอแม้ไม่มีบรรทัดไหนตรงเลย ซึ่งเป็นสาเหตุที่บั๊กเดิมเงียบสนิท
+
+    - name: "[4] อ่านค่าที่ sshd จะใช้จริง"
+      ansible.builtin.command: sshd -T
+      register: sshd_effective
+      changed_when: false
+      # ⛔ changed_when: false บังคับไว้ทุก command/shell
+      #    ไม่งั้นมันจะรายงาน changed ทุกครั้ง แล้วเทสต์รันซ้ำจะไม่มีวันผ่าน
+
+    - name: "[4] ยืนยันว่าค่าที่ sshd อ่านได้ตรงกับที่ตั้งไว้"
+      # ⭐⭐ ขั้นที่สำคัญที่สุดของทั้งไฟล์
+      #    บั๊กเดิมคือแก้ไฟล์สำเร็จ แต่ไฟล์ของผู้ให้บริการทับกลับ
+      #    การเขียนไฟล์ลงไปจึงไม่ใช่หลักฐานว่า sshd จะใช้ค่านั้น
+      ansible.builtin.assert:
+        that:
+          - "'permitrootlogin no' in sshd_effective.stdout"
+          - "'passwordauthentication no' in sshd_effective.stdout"
+          - "'pubkeyauthentication yes' in sshd_effective.stdout"
+        fail_msg: >-
+          sshd อ่านค่าได้ไม่ตรงกับที่ตั้งไว้ มีไฟล์ใน /etc/ssh/sshd_config.d/
+          ที่เรียงมาก่อน 00-hardening.conf แล้วทับค่ากลับ
+        success_msg: "sshd ปิด root login และปิดการล็อกอินด้วยรหัสผ่านจริง"
+
+    # ── 5. ไฟร์วอลล์ ───────────────────────────────────────────────────
+    - name: "[5] ติดตั้ง ufw"
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    - name: "[5] ตั้งค่าปริยาย ขาเข้าปฏิเสธ ขาออกอนุญาต"
+      community.general.ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: incoming, policy: deny }
+        - { direction: outgoing, policy: allow }
+      # ⛔ ลำดับสำคัญ ต้องเปิดพอร์ต 22 ก่อนสั่ง enable
+      #    ไม่งั้นจะตัดการเชื่อมต่อของตัวเองตอน playbook ยังรันไม่จบ
+
+    - name: "[5] เปิดเฉพาะพอร์ตที่ต้องใช้"
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: "{{ allowed_ports }}"
+
+    - name: "[5] เปิดใช้งานไฟร์วอลล์"
+      community.general.ufw:
+        state: enabled
+
+    # ── 6. fail2ban ────────────────────────────────────────────────────
+    - name: "[6] ติดตั้ง fail2ban"
+      ansible.builtin.apt:
+        name: fail2ban
+        state: present
+
+    - name: "[6] เปิดบริการ fail2ban ให้ทำงานและสตาร์ตเองเมื่อรีบูต"
+      ansible.builtin.service:
+        name: fail2ban
+        state: started
+        enabled: true
+
+    # ── 7. อัปเดตความปลอดภัยอัตโนมัติ ──────────────────────────────────
+    - name: "[7] ติดตั้ง unattended-upgrades"
+      ansible.builtin.apt:
+        name: unattended-upgrades
+        state: present
+
+    - name: "[7] เปิดใช้งานให้ทำงานเองทุกวัน"
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+      # ⭐ เขียนไฟล์ตรงๆ แทน dpkg-reconfigure เพราะ dpkg-reconfigure
+      #    เป็นคำสั่งที่รายงาน changed ทุกครั้ง และไม่บอกว่าผลลัพธ์คืออะไร
+      #    ส่วน copy เทียบเนื้อไฟล์ให้ จึงรันซ้ำแล้วเงียบ

@@ -1,0 +1,111 @@
+name: รัน Ansible playbook กับเครื่องจริง และพิสูจน์ว่ารันซ้ำแล้วไม่เปลี่ยนอะไร
+
+# ⭐ งานนี้ตอบคำถามสองข้อที่ต่างกัน
+#    1. playbook ทำให้เครื่องแข็งขึ้นจริงไหม   → ใช้ตัวตรวจตัวเดียวกับ harden.sh
+#    2. playbook เขียนถูกวิธีหรือเปล่า          → รันรอบสองต้องได้ changed=0
+#
+#    ข้อ 2 คือข้อที่แยก playbook ของจริง ออกจาก shell script ที่ห่อ YAML ไว้
+#    ถ้าเขียนด้วย command: ทุกบรรทัด ข้อ 1 จะผ่าน แต่ข้อ 2 จะไม่มีวันผ่าน
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ansible:
+    runs-on: ubuntu-latest
+
+    env:
+      TEST_USER: deploy
+      ANSIBLE_STDOUT_CALLBACK: default
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: ติดตั้ง Ansible
+        run: |
+          # แพ็กเกจ ansible (ไม่ใช่ ansible-core) มี community.general กับ ansible.posix มาด้วย
+          pip install ansible
+          ansible --version | head -2
+          ansible-galaxy collection list 2>/dev/null | grep -E 'community.general|ansible.posix' || true
+
+      - name: ตรวจไวยากรณ์และกฎการเขียน
+        run: |
+          pip install ansible-lint
+          cd ansible
+          ansible-playbook --syntax-check -i localhost, -c local harden.yml -e "ssh_pubkey=dummy-key-for-syntax-check-only"
+          # ⚠️ ปล่อยให้ lint เตือนได้ แต่ยังไม่บังคับให้ผ่าน เพราะกฎบางข้อเป็นเรื่องสไตล์
+          ansible-lint harden.yml || echo "(ansible-lint มีข้อเตือน ดูด้านบน)"
+
+      - name: ก่อนรัน ตัวตรวจต้องไม่ผ่าน (ตัวควบคุมด้านลบ)
+        run: |
+          chmod +x verify-hardening.sh
+          if sudo bash verify-hardening.sh "$TEST_USER"; then
+            echo "!! ตัวตรวจผ่านทั้งที่ยังไม่ได้ทำอะไร ผลตอนท้ายจะไม่มีความหมาย"
+            exit 1
+          fi
+          echo "ok: ตัวตรวจจับเครื่องที่ยังไม่ได้ harden ได้"
+
+      - name: สร้างกุญแจ SSH ใช้ครั้งเดียว
+        run: ssh-keygen -t ed25519 -N "" -C "ci-throwaway" -f /tmp/ci_key
+
+      - name: รอบที่ 1 — รัน playbook
+        run: |
+          cd ansible
+          ansible-playbook -i localhost, -c local harden.yml \
+            -e "target_user=$TEST_USER" \
+            -e "ssh_pubkey='$(cat /tmp/ci_key.pub)'" \
+            | tee /tmp/run1.log
+
+      - name: ตัวตรวจต้องผ่านครบหลังรอบที่ 1
+        run: sudo bash verify-hardening.sh "$TEST_USER"
+
+      # ⭐⭐ ขั้นนี้คือเหตุผลทั้งหมดที่ย้ายจาก shell script มาเป็น Ansible
+      #    ถ้ารันซ้ำแล้วยังมี changed อยู่ แปลว่ามีงานที่ทำซ้ำโดยไม่จำเป็น
+      #    บนเครื่องจริงนั่นหมายถึงบริการถูกรีสตาร์ตทุกครั้งที่รัน playbook
+      #    = ตัดคนที่กำลังใช้งานอยู่ทิ้งโดยไม่มีเหตุผล
+      - name: รอบที่ 2 — ต้องได้ changed=0
+        run: |
+          cd ansible
+          ansible-playbook -i localhost, -c local harden.yml \
+            -e "target_user=$TEST_USER" \
+            -e "ssh_pubkey='$(cat /tmp/ci_key.pub)'" \
+            | tee /tmp/run2.log
+
+          echo ""
+          echo "===== บรรทัดสรุปของรอบที่ 2 ====="
+          grep -E '^localhost' /tmp/run2.log || true
+
+          CHANGED=$(grep -oE 'changed=[0-9]+' /tmp/run2.log | tail -1 | cut -d= -f2)
+          echo "changed = ${CHANGED:-อ่านไม่ได้}"
+
+          if [ "${CHANGED:-1}" != "0" ]; then
+            echo ""
+            echo "!! รันรอบสองแล้วยังมีของเปลี่ยน $CHANGED รายการ"
+            echo "!! แปลว่ามี task ที่รายงาน changed ทุกครั้ง มักเกิดจาก command:/shell:"
+            echo "!! ที่ไม่ได้ตั้ง changed_when: false"
+            echo ""
+            echo "รายการที่เปลี่ยนในรอบสอง:"
+            grep -B1 'changed:' /tmp/run2.log | grep 'TASK' || true
+            exit 1
+          fi
+          echo "ok: รันซ้ำแล้วไม่มีอะไรเปลี่ยน"
+
+      - name: ตัวตรวจต้องยังผ่านครบหลังรอบที่ 2
+        run: sudo bash verify-hardening.sh "$TEST_USER"
+
+      - name: เทียบสองรอบให้เห็นด้วยตา
+        if: always()
+        run: |
+          echo "===== รอบที่ 1 ====="
+          grep -E '^localhost' /tmp/run1.log || true
+          echo ""
+          echo "===== รอบที่ 2 ====="
+          grep -E '^localhost' /tmp/run2.log || true
