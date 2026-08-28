@@ -53,10 +53,12 @@ echo "[4/7] Hardening SSH (key-only, no root)..."
 # and sshd takes the FIRST value it sees for a keyword, not the last. So every
 # file in that directory is read before the rest of the main file and wins.
 #
-# Ubuntu cloud images ship /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
-# containing `PasswordAuthentication yes`. Every provider built on those images
-# has it: DigitalOcean, AWS, Oracle Cloud, Hetzner, and the GitHub Actions
-# runner this script is tested on.
+# Ubuntu cloud images ship a drop-in that sets `PasswordAuthentication yes`.
+# Observed on the GitHub Actions runner as /etc/ssh/sshd_config.d/50-cloud-init.conf;
+# other images use 60-cloudimg-settings.conf for the same thing. Anything built
+# on an Ubuntu cloud image is likely to have one of them -- DigitalOcean, AWS,
+# Oracle Cloud, Hetzner. Do not assume the filename; check what is in the
+# directory and check what `sshd -T` resolves to.
 #
 # Caught in CI on 2026-08-28. The old version of this script ran to completion,
 # printed "password login is now OFF", and left password login ON. sed reports
