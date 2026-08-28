@@ -85,6 +85,15 @@ sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/'              "$SSHD"
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD"
 sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/'    "$SSHD"
 
+# `sshd -t` and `sshd -T` both refuse to run without the privilege separation
+# directory, with "Missing privilege separation directory: /run/sshd" and exit
+# 255. It is a tmpfs path that systemd creates via RuntimeDirectory=sshd, so it
+# is absent whenever sshd is not currently running -- which is exactly the state
+# apt leaves it in for a moment after upgrading openssh-server in step 1.
+# Caught in CI on 2026-08-28. Creating it here is what the service unit does
+# anyway, and is a no-op when sshd is already up.
+install -d -m 0755 /run/sshd
+
 # Refuse to restart on a config sshd cannot parse: a bad restart locks you out.
 sshd -t
 
